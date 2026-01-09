@@ -1,0 +1,266 @@
+name: إدارة منشورات Facebook اليومية
+
+on:
+  # تشغيل يدوي
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'الإجراء (publish/update)'
+        required: true
+        default: 'publish'
+        type: choice
+        options:
+          - publish
+          - update
+  
+  # تشغيل تلقائي يومياً
+  schedule:
+    # كل يوم الساعة 8 مساءً بتوقيت UTC (9 مساءً بتوقيت المغرب في الشتاء)
+    - cron: '0 20 * * *'
+
+jobs:
+  manage_post:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: تحميل الملفات
+      uses: actions/checkout@v3
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        fetch-depth: 0
+    
+    - name: إعداد Git
+      run: |
+        git config user.name "GitHub Actions Bot"
+        git config user.email "actions@github.com"
+    
+    - name: التحقق من وجود منشور اليوم
+      id: check_today_post
+      run: |
+        TODAY=$(date +%Y-%m-%d)
+        echo "today=$TODAY" >> $GITHUB_OUTPUT
+        
+        # إنشاء مجلد البيانات إذا لم يكن موجوداً
+        mkdir -p data
+        
+        # التحقق من وجود ملف سجل المنشورات
+        if [ ! -f "data/posts_log.json" ]; then
+          echo '{"posts": []}' > data/posts_log.json
+          echo "تم إنشاء ملف السجل"
+        fi
+        
+        # البحث عن منشور اليوم
+        TODAY_POST=$(jq -r --arg today "$TODAY" '.posts[] | select(.date == $today) | .post_id' data/posts_log.json)
+        
+        if [ -z "$TODAY_POST" ] || [ "$TODAY_POST" == "null" ]; then
+          echo "action=publish" >> $GITHUB_OUTPUT
+          echo "post_exists=false" >> $GITHUB_OUTPUT
+          echo "📝 لا يوجد منشور لليوم - سيتم النشر"
+        else
+          echo "action=update" >> $GITHUB_OUTPUT
+          echo "post_exists=true" >> $GITHUB_OUTPUT
+          echo "existing_post_id=$TODAY_POST" >> $GITHUB_OUTPUT
+          echo "🔄 يوجد منشور لليوم ($TODAY_POST) - سيتم التعديل"
+        fi
+    
+    - name: اختيار منشور عشوائي
+      id: select_post
+      run: |
+        # التحقق من وجود ملفات منشورات
+        if [ ! -d "posts" ] || [ -z "$(ls -A posts/*.txt 2>/dev/null)" ]; then
+          echo "❌ خطأ: لا توجد ملفات منشورات في مجلد posts/"
+          exit 1
+        fi
+        
+        # اختيار ملف عشوائي
+        POST_FILE=$(ls posts/*.txt | shuf -n 1 | xargs basename)
+        echo "post_file=$POST_FILE" >> $GITHUB_OUTPUT
+        echo "📄 المنشور المختار: $POST_FILE"
+    
+    - name: قراءة محتوى المنشور
+      id: read_content
+      run: |
+        POST_PATH="posts/${{ steps.select_post.outputs.post_file }}"
+        
+        if [ ! -f "$POST_PATH" ]; then
+          echo "❌ خطأ: الملف غير موجود: $POST_PATH"
+          exit 1
+        fi
+        
+        # قراءة المحتوى
+        CONTENT=$(cat "$POST_PATH")
+        
+        # حفظ في ملف مؤقت
+        echo "$CONTENT" > /tmp/post_content.txt
+        
+        echo "✅ تم قراءة المحتوى بنجاح"
+        echo "المحتوى:"
+        echo "---"
+        cat /tmp/post_content.txt
+        echo "---"
+    
+    - name: نشر منشور جديد
+      if: steps.check_today_post.outputs.action == 'publish'
+      id: publish_post
+      env:
+        FB_PAGE_TOKEN: ${{ secrets.FB_PAGE_TOKEN }}
+        FB_PAGE_ID: ${{ secrets.FB_PAGE_ID }}
+      run: |
+        echo "📤 جاري النشر على Facebook..."
+        
+        # تحويل المحتوى لـ URL encoding
+        MESSAGE=$(cat /tmp/post_content.txt | jq -sRr @uri)
+        
+        # النشر على Facebook
+        RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+          "https://graph.facebook.com/v21.0/$FB_PAGE_ID/feed" \
+          -d "message=$MESSAGE" \
+          -d "access_token=$FB_PAGE_TOKEN")
+        
+        # فصل الـ response عن status code
+        HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+        BODY=$(echo "$RESPONSE" | head -n-1)
+        
+        echo "HTTP Status: $HTTP_CODE"
+        echo "Response: $BODY"
+        
+        # التحقق من النجاح
+        if [ "$HTTP_CODE" -eq 200 ]; then
+          POST_ID=$(echo "$BODY" | jq -r '.id')
+          
+          if [ -z "$POST_ID" ] || [ "$POST_ID" == "null" ]; then
+            echo "❌ فشل استخراج Post ID"
+            echo "$BODY" | jq '.'
+            exit 1
+          fi
+          
+          echo "post_id=$POST_ID" >> $GITHUB_OUTPUT
+          echo "✅ تم النشر بنجاح!"
+          echo "🆔 Post ID: $POST_ID"
+        else
+          echo "❌ فشل النشر!"
+          echo "$BODY" | jq '.'
+          exit 1
+        fi
+    
+    - name: تعديل المنشور الموجود
+      if: steps.check_today_post.outputs.action == 'update'
+      env:
+        FB_PAGE_TOKEN: ${{ secrets.FB_PAGE_TOKEN }}
+      run: |
+        POST_ID="${{ steps.check_today_post.outputs.existing_post_id }}"
+        echo "🔄 جاري تعديل المنشور: $POST_ID"
+        
+        # تحويل المحتوى لـ URL encoding
+        MESSAGE=$(cat /tmp/post_content.txt | jq -sRr @uri)
+        
+        # تعديل المنشور
+        RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+          "https://graph.facebook.com/v21.0/$POST_ID" \
+          -d "message=$MESSAGE" \
+          -d "access_token=$FB_PAGE_TOKEN")
+        
+        HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+        BODY=$(echo "$RESPONSE" | head -n-1)
+        
+        echo "HTTP Status: $HTTP_CODE"
+        echo "Response: $BODY"
+        
+        # التحقق من النجاح
+        if echo "$BODY" | jq -e '.success == true' > /dev/null 2>&1; then
+          echo "✅ تم تعديل المنشور بنجاح!"
+        else
+          echo "❌ فشل التعديل!"
+          echo "$BODY" | jq '.'
+          exit 1
+        fi
+    
+    - name: تحديث سجل المنشورات
+      if: steps.check_today_post.outputs.action == 'publish'
+      run: |
+        TODAY="${{ steps.check_today_post.outputs.today }}"
+        POST_ID="${{ steps.publish_post.outputs.post_id }}"
+        POST_FILE="${{ steps.select_post.outputs.post_file }}"
+        TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+        
+        # إضافة السجل الجديد
+        jq --arg date "$TODAY" \
+           --arg post_id "$POST_ID" \
+           --arg file "$POST_FILE" \
+           --arg time "$TIMESTAMP" \
+           '.posts += [{
+             "date": $date,
+             "post_id": $post_id,
+             "file": $file,
+             "published_at": $time,
+             "action": "published"
+           }]' data/posts_log.json > data/posts_log.tmp
+        
+        mv data/posts_log.tmp data/posts_log.json
+        
+        echo "✅ تم تحديث السجل"
+    
+    - name: تحديث سجل التعديلات
+      if: steps.check_today_post.outputs.action == 'update'
+      run: |
+        TODAY="${{ steps.check_today_post.outputs.today }}"
+        POST_FILE="${{ steps.select_post.outputs.post_file }}"
+        TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+        
+        # تحديث السجل بالتعديل
+        jq --arg date "$TODAY" \
+           --arg file "$POST_FILE" \
+           --arg time "$TIMESTAMP" \
+           '(.posts[] | select(.date == $date)) += {
+             "file": $file,
+             "updated_at": $time,
+             "action": "updated"
+           }' data/posts_log.json > data/posts_log.tmp
+        
+        mv data/posts_log.tmp data/posts_log.json
+        
+        echo "✅ تم تحديث سجل التعديلات"
+    
+    - name: حفظ التغييرات في Git
+      run: |
+        git add data/posts_log.json
+        
+        if git diff --staged --quiet; then
+          echo "ℹ️ لا توجد تغييرات للحفظ"
+        else
+          TODAY="${{ steps.check_today_post.outputs.today }}"
+          ACTION="${{ steps.check_today_post.outputs.action }}"
+          
+          if [ "$ACTION" == "publish" ]; then
+            COMMIT_MSG="✨ نشر منشور جديد - $TODAY"
+          else
+            COMMIT_MSG="🔄 تعديل منشور - $TODAY"
+          fi
+          
+          git commit -m "$COMMIT_MSG"
+          git push
+          echo "✅ تم حفظ السجل في Git"
+        fi
+    
+    - name: عرض ملخص العملية
+      if: always()
+      run: |
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "📊 ملخص العملية"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "📅 التاريخ: ${{ steps.check_today_post.outputs.today }}"
+        echo "🎬 الإجراء: ${{ steps.check_today_post.outputs.action }}"
+        echo "📄 الملف: ${{ steps.select_post.outputs.post_file }}"
+        
+        if [ "${{ steps.check_today_post.outputs.action }}" == "publish" ]; then
+          echo "🆔 Post ID: ${{ steps.publish_post.outputs.post_id }}"
+        else
+          echo "🆔 Post ID: ${{ steps.check_today_post.outputs.existing_post_id }}"
+        fi
+        
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        
+        # عرض آخر 5 سجلات
+        echo ""
+        echo "📋 آخر المنشورات:"
+        jq -r '.posts[-5:] | reverse | .[] | "  • \(.date) - \(.action) - \(.file)"' data/posts_log.json || echo "  لا توجد سجلات"
