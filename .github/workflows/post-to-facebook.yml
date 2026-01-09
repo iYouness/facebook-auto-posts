@@ -1,58 +1,420 @@
-name: نشر على Facebook
+name: إدارة منشورات Facebook الذكية
 
 on:
-  # تشغيل يدوي
   workflow_dispatch:
     inputs:
-      post_file:
-        description: 'اسم الملف (مثلاً: post1.txt)'
+      action:
+        description: 'الإجراء المطلوب'
         required: true
-        default: 'post1.txt'
+        type: choice
+        options:
+          - publish
+          - update
+        default: 'update'
+      
+      post_file:
+        description: 'اسم الملف (اتركه فارغاً للاختيار العشوائي)'
+        required: false
+        default: ''
   
-  # تشغيل تلقائي
   schedule:
-    # كل يوم الساعة 8 مساءً بتوقيت UTC
-    - cron: '25 15 * * *'
+    # يمكنك تعديل هذه الأوقات حسب رغبتك
+    # الصباح: 8 صباحاً UTC
+    - cron: '59 15 * * *'
+    # الظهر: 1 ظهراً UTC
+    - cron: '2 16 * * *'
+    # المساء: 6 مساءً UTC
+    - cron: '4 16 * * *'
 
 jobs:
-  post:
+  manage_post:
     runs-on: ubuntu-latest
     
     steps:
     - name: تحميل الملفات
       uses: actions/checkout@v3
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        fetch-depth: 0
     
-    - name: اختيار منشور عشوائي
+    - name: إعداد Git
+      run: |
+        git config user.name "GitHub Actions Bot"
+        git config user.email "actions@github.com"
+    
+    - name: تحديد الإجراء المطلوب
+      id: determine_action
+      run: |
+        TODAY=$(date +%Y-%m-%d)
+        CURRENT_TIME=$(date +%H:%M)
+        
+        echo "today=$TODAY" >> $GITHUB_OUTPUT
+        echo "current_time=$CURRENT_TIME" >> $GITHUB_OUTPUT
+        
+        # إنشاء مجلد البيانات
+        mkdir -p data
+        
+        if [ ! -f "data/posts_log.json" ]; then
+          echo '{
+            "posts": [],
+            "schedule": {
+              "times": ["08:00", "13:00", "18:00"],
+              "timezone": "UTC"
+            }
+          }' > data/posts_log.json
+        fi
+        
+        # تحديد الإجراء
+        if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+          ACTION="${{ github.event.inputs.action }}"
+          echo "🖱️ تشغيل يدوي - الإجراء: $ACTION"
+        else
+          # التحقق من وجود منشور اليوم
+          TODAY_POST=$(jq -r --arg today "$TODAY" \
+            '.posts[] | select(.date == $today) | .post_id' \
+            data/posts_log.json)
+          
+          if [ -z "$TODAY_POST" ] || [ "$TODAY_POST" == "null" ]; then
+            ACTION="publish"
+            echo "📝 أول تشغيل اليوم - سيتم النشر"
+          else
+            ACTION="update"
+            echo "🔄 منشور موجود - سيتم التعديل"
+          fi
+        fi
+        
+        echo "action=$ACTION" >> $GITHUB_OUTPUT
+        
+        # البحث عن Post ID إذا كان موجوداً
+        POST_ID=$(jq -r --arg today "$TODAY" \
+          '.posts[] | select(.date == $today) | .post_id' \
+          data/posts_log.json)
+        
+        if [ -n "$POST_ID" ] && [ "$POST_ID" != "null" ]; then
+          echo "existing_post_id=$POST_ID" >> $GITHUB_OUTPUT
+          echo "🆔 Post ID الموجود: $POST_ID"
+        fi
+    
+    - name: اختيار ملف المنشور
       id: select_post
       run: |
-        if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-          POST_FILE="${{ github.event.inputs.post_file }}"
-        else
-          # اختيار ملف عشوائي من المجلد
-          POST_FILE=$(ls posts/*.txt | shuf -n 1 | xargs basename)
+        # التحقق من وجود ملفات
+        if [ ! -d "posts" ]; then
+          echo "❌ خطأ: مجلد posts غير موجود"
+          exit 1
         fi
+        
+        # إذا تم تحديد ملف يدوياً
+        if [ -n "${{ github.event.inputs.post_file }}" ]; then
+          POST_FILE="posts/${{ github.event.inputs.post_file }}"
+          
+          if [ ! -f "$POST_FILE" ]; then
+            echo "❌ خطأ: الملف غير موجود: $POST_FILE"
+            exit 1
+          fi
+          
+          echo "manual_selection=true" >> $GITHUB_OUTPUT
+        else
+          # اختيار عشوائي من ملفات txt
+          TEXT_FILES=$(find posts -name "*.txt" -type f)
+          
+          if [ -z "$TEXT_FILES" ]; then
+            echo "❌ خطأ: لا توجد ملفات txt في مجلد posts"
+            exit 1
+          fi
+          
+          POST_FILE=$(echo "$TEXT_FILES" | shuf -n 1)
+          echo "manual_selection=false" >> $GITHUB_OUTPUT
+        fi
+        
+        POST_BASENAME=$(basename "$POST_FILE")
+        POST_DIR=$(dirname "$POST_FILE")
+        
         echo "post_file=$POST_FILE" >> $GITHUB_OUTPUT
-        echo "المنشور المختار: $POST_FILE"
+        echo "post_basename=$POST_BASENAME" >> $GITHUB_OUTPUT
+        echo "post_dir=$POST_DIR" >> $GITHUB_OUTPUT
+        
+        echo "✅ تم اختيار: $POST_BASENAME"
     
-    - name: قراءة المحتوى
+    - name: البحث عن صورة مرفقة
+      id: find_image
+      run: |
+        POST_FILE="${{ steps.select_post.outputs.post_file }}"
+        POST_DIR="${{ steps.select_post.outputs.post_dir }}"
+        POST_NAME="${{ steps.select_post.outputs.post_basename }}"
+        
+        # إزالة الامتداد
+        BASE_NAME="${POST_NAME%.txt}"
+        
+        # البحث عن صورة بنفس الاسم
+        IMAGE_FILE=""
+        
+        for ext in jpg jpeg png gif; do
+          if [ -f "$POST_DIR/$BASE_NAME.$ext" ]; then
+            IMAGE_FILE="$POST_DIR/$BASE_NAME.$ext"
+            break
+          fi
+        done
+        
+        # إذا لم توجد صورة بنفس الاسم، ابحث عن أي صورة في نفس المجلد
+        if [ -z "$IMAGE_FILE" ]; then
+          IMAGE_FILE=$(find "$POST_DIR" -maxdepth 1 \( -name "*.jpg" -o -name "*.jpeg" -o -name "*.png" -o -name "*.gif" \) -type f | head -n 1)
+        fi
+        
+        if [ -n "$IMAGE_FILE" ]; then
+          echo "has_image=true" >> $GITHUB_OUTPUT
+          echo "image_file=$IMAGE_FILE" >> $GITHUB_OUTPUT
+          echo "📸 صورة مرفقة: $(basename $IMAGE_FILE)"
+        else
+          echo "has_image=false" >> $GITHUB_OUTPUT
+          echo "📝 منشور نصي فقط (بدون صورة)"
+        fi
+    
+    - name: قراءة محتوى المنشور
       id: read_content
       run: |
-        CONTENT=$(cat "posts/${{ steps.select_post.outputs.post_file }}")
-        # تحويل الأسطر المتعددة لنص واحد
-        CONTENT="${CONTENT//'%'/'%25'}"
-        CONTENT="${CONTENT//$'\n'/'%0A'}"
-        CONTENT="${CONTENT//$'\r'/'%0D'}"
-        echo "content=$CONTENT" >> $GITHUB_OUTPUT
+        POST_FILE="${{ steps.select_post.outputs.post_file }}"
+        CURRENT_TIME="${{ steps.determine_action.outputs.current_time }}"
+        
+        if [ ! -f "$POST_FILE" ]; then
+          echo "❌ خطأ: الملف غير موجود"
+          exit 1
+        fi
+        
+        CONTENT=$(cat "$POST_FILE")
+        
+        # إضافة timestamp (اختياري - يمكنك حذف هذا الجزء)
+        # FOOTER="\n\n⏰ تم التحديث: $CURRENT_TIME UTC"
+        # FULL_CONTENT="${CONTENT}${FOOTER}"
+        
+        # حفظ بدون footer إذا أردت
+        FULL_CONTENT="$CONTENT"
+        
+        echo "$FULL_CONTENT" > /tmp/post_content.txt
+        
+        echo "✅ تم قراءة المحتوى"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━"
+        cat /tmp/post_content.txt
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━"
     
-    - name: نشر على Facebook
+    - name: نشر منشور جديد
+      if: steps.determine_action.outputs.action == 'publish'
+      id: publish_post
       env:
         FB_PAGE_TOKEN: ${{ secrets.FB_PAGE_TOKEN }}
         FB_PAGE_ID: ${{ secrets.FB_PAGE_ID }}
       run: |
-        MESSAGE="${{ steps.read_content.outputs.content }}"
+        echo "📤 جاري النشر..."
         
-        curl -X POST "https://graph.facebook.com/v18.0/$FB_PAGE_ID/feed" \
+        MESSAGE=$(cat /tmp/post_content.txt | jq -sRr @uri)
+        HAS_IMAGE="${{ steps.find_image.outputs.has_image }}"
+        
+        if [ "$HAS_IMAGE" == "true" ]; then
+          IMAGE_FILE="${{ steps.find_image.outputs.image_file }}"
+          echo "📸 نشر مع صورة: $(basename $IMAGE_FILE)"
+          
+          # رفع الصورة أولاً
+          PHOTO_RESPONSE=$(curl -s -F "source=@$IMAGE_FILE" \
+            -F "access_token=${{ secrets.FB_PAGE_TOKEN }}" \
+            "https://graph.facebook.com/v21.0/${{ secrets.FB_PAGE_ID }}/photos" \
+            -F "published=false")
+          
+          PHOTO_ID=$(echo "$PHOTO_RESPONSE" | jq -r '.id')
+          
+          if [ -z "$PHOTO_ID" ] || [ "$PHOTO_ID" == "null" ]; then
+            echo "⚠️ فشل رفع الصورة، سيتم النشر بدون صورة"
+            echo "$PHOTO_RESPONSE" | jq '.'
+            HAS_IMAGE="false"
+          else
+            echo "✅ تم رفع الصورة: $PHOTO_ID"
+          fi
+        fi
+        
+        # النشر
+        if [ "$HAS_IMAGE" == "true" ]; then
+          # نشر مع صورة
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+            "https://graph.facebook.com/v21.0/$FB_PAGE_ID/feed" \
+            -d "message=$MESSAGE" \
+            -d "attached_media[0]={\"media_fbid\":\"$PHOTO_ID\"}" \
+            -d "access_token=$FB_PAGE_TOKEN")
+        else
+          # نشر نصي فقط
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+            "https://graph.facebook.com/v21.0/$FB_PAGE_ID/feed" \
+            -d "message=$MESSAGE" \
+            -d "access_token=$FB_PAGE_TOKEN")
+        fi
+        
+        HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+        BODY=$(echo "$RESPONSE" | head -n-1)
+        
+        echo "HTTP Status: $HTTP_CODE"
+        
+        if [ "$HTTP_CODE" -eq 200 ]; then
+          POST_ID=$(echo "$BODY" | jq -r '.id')
+          
+          if [ -z "$POST_ID" ] || [ "$POST_ID" == "null" ]; then
+            echo "❌ فشل استخراج Post ID"
+            echo "$BODY" | jq '.'
+            exit 1
+          fi
+          
+          echo "post_id=$POST_ID" >> $GITHUB_OUTPUT
+          echo "✅ تم النشر بنجاح!"
+          echo "🆔 Post ID: $POST_ID"
+        else
+          echo "❌ فشل النشر!"
+          echo "$BODY" | jq '.'
+          exit 1
+        fi
+    
+    - name: تعديل المنشور الموجود
+      if: steps.determine_action.outputs.action == 'update'
+      env:
+        FB_PAGE_TOKEN: ${{ secrets.FB_PAGE_TOKEN }}
+      run: |
+        POST_ID="${{ steps.determine_action.outputs.existing_post_id }}"
+        
+        if [ -z "$POST_ID" ] || [ "$POST_ID" == "null" ]; then
+          echo "❌ خطأ: لا يوجد Post ID للتعديل"
+          exit 1
+        fi
+        
+        echo "🔄 جاري تعديل المنشور: $POST_ID"
+        
+        MESSAGE=$(cat /tmp/post_content.txt | jq -sRr @uri)
+        
+        RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+          "https://graph.facebook.com/v21.0/$POST_ID" \
           -d "message=$MESSAGE" \
-          -d "access_token=$FB_PAGE_TOKEN"
+          -d "access_token=$FB_PAGE_TOKEN")
         
-        echo "✅ تم النشر بنجاح!"
+        HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+        BODY=$(echo "$RESPONSE" | head -n-1)
+        
+        echo "HTTP Status: $HTTP_CODE"
+        
+        if echo "$BODY" | jq -e '.success == true' > /dev/null 2>&1; then
+          UPDATE_COUNT=$(jq --arg today "${{ steps.determine_action.outputs.today }}" \
+            '.posts[] | select(.date == $today) | .updates | length' \
+            data/posts_log.json)
+          
+          echo "✅ تم التعديل بنجاح!"
+          echo "🔢 التعديل رقم: $((UPDATE_COUNT + 1))"
+        else
+          echo "❌ فشل التعديل!"
+          echo "$BODY" | jq '.'
+          exit 1
+        fi
+    
+    - name: تحديث السجل
+      run: |
+        TODAY="${{ steps.determine_action.outputs.today }}"
+        ACTION="${{ steps.determine_action.outputs.action }}"
+        POST_FILE="${{ steps.select_post.outputs.post_basename }}"
+        TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+        CURRENT_TIME="${{ steps.determine_action.outputs.current_time }}"
+        HAS_IMAGE="${{ steps.find_image.outputs.has_image }}"
+        
+        if [ "$ACTION" == "publish" ]; then
+          POST_ID="${{ steps.publish_post.outputs.post_id }}"
+          
+          # إنشاء سجل جديد
+          jq --arg date "$TODAY" \
+             --arg post_id "$POST_ID" \
+             --arg file "$POST_FILE" \
+             --arg time "$TIMESTAMP" \
+             --arg clock "$CURRENT_TIME" \
+             --arg img "$HAS_IMAGE" \
+             '.posts += [{
+               "date": $date,
+               "post_id": $post_id,
+               "initial_file": $file,
+               "published_at": $time,
+               "published_time": $clock,
+               "has_image": ($img == "true"),
+               "updates": [{
+                 "file": $file,
+                 "timestamp": $time,
+                 "time": $clock,
+                 "action": "published",
+                 "has_image": ($img == "true")
+               }]
+             }]' data/posts_log.json > data/posts_log.tmp
+          
+        else
+          # تحديث سجل موجود
+          jq --arg date "$TODAY" \
+             --arg file "$POST_FILE" \
+             --arg time "$TIMESTAMP" \
+             --arg clock "$CURRENT_TIME" \
+             --arg img "$HAS_IMAGE" \
+             '(.posts[] | select(.date == $date).updates) += [{
+               "file": $file,
+               "timestamp": $time,
+               "time": $clock,
+               "action": "updated",
+               "has_image": ($img == "true")
+             }]' data/posts_log.json > data/posts_log.tmp
+        fi
+        
+        mv data/posts_log.tmp data/posts_log.json
+        echo "✅ تم تحديث السجل"
+    
+    - name: حفظ التغييرات
+      run: |
+        git add data/posts_log.json
+        
+        if git diff --staged --quiet; then
+          echo "ℹ️ لا توجد تغييرات"
+        else
+          ACTION="${{ steps.determine_action.outputs.action }}"
+          TIME="${{ steps.determine_action.outputs.current_time }}"
+          
+          if [ "$ACTION" == "publish" ]; then
+            MSG="✨ نشر منشور - $TIME UTC"
+          else
+            MSG="🔄 تعديل منشور - $TIME UTC"
+          fi
+          
+          git commit -m "$MSG"
+          git push
+          echo "✅ تم الحفظ"
+        fi
+    
+    - name: ملخص العملية
+      if: always()
+      run: |
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "📊 ملخص العملية"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo ""
+        echo "📅 التاريخ: ${{ steps.determine_action.outputs.today }}"
+        echo "⏰ الوقت: ${{ steps.determine_action.outputs.current_time }} UTC"
+        echo "🎬 الإجراء: ${{ steps.determine_action.outputs.action }}"
+        echo "📄 الملف: ${{ steps.select_post.outputs.post_basename }}"
+        echo "📸 صورة: ${{ steps.find_image.outputs.has_image }}"
+        
+        if [ "${{ steps.find_image.outputs.has_image }}" == "true" ]; then
+          echo "🖼️  الصورة: $(basename ${{ steps.find_image.outputs.image_file }})"
+        fi
+        
+        if [ "${{ steps.determine_action.outputs.action }}" == "publish" ]; then
+          echo "🆔 Post ID: ${{ steps.publish_post.outputs.post_id }}"
+        else
+          echo "🆔 Post ID: ${{ steps.determine_action.outputs.existing_post_id }}"
+        fi
+        
+        echo ""
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "📋 تحديثات اليوم"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        
+        TODAY="${{ steps.determine_action.outputs.today }}"
+        jq -r --arg today "$TODAY" \
+          '.posts[] | select(.date == $today) | .updates[] | 
+          "⏰ \(.time) - \(.action) - 📄 \(.file)"' \
+          data/posts_log.json 2>/dev/null || echo "لا توجد تحديثات"
+        
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
