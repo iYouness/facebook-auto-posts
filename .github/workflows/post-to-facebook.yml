@@ -1,0 +1,58 @@
+name: نشر على Facebook
+
+on:
+  # تشغيل يدوي
+  workflow_dispatch:
+    inputs:
+      post_file:
+        description: 'اسم الملف (مثلاً: post1.txt)'
+        required: true
+        default: 'post1.txt'
+  
+  # تشغيل تلقائي
+  schedule:
+    # كل يوم الساعة 8 مساءً بتوقيت UTC
+    - cron: '56 15 * * *'
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: تحميل الملفات
+      uses: actions/checkout@v3
+    
+    - name: اختيار منشور عشوائي
+      id: select_post
+      run: |
+        if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+          POST_FILE="${{ github.event.inputs.post_file }}"
+        else
+          # اختيار ملف عشوائي من المجلد
+          POST_FILE=$(ls posts/*.txt | shuf -n 1 | xargs basename)
+        fi
+        echo "post_file=$POST_FILE" >> $GITHUB_OUTPUT
+        echo "المنشور المختار: $POST_FILE"
+    
+    - name: قراءة المحتوى
+      id: read_content
+      run: |
+        CONTENT=$(cat "posts/${{ steps.select_post.outputs.post_file }}")
+        # تحويل الأسطر المتعددة لنص واحد
+        CONTENT="${CONTENT//'%'/'%25'}"
+        CONTENT="${CONTENT//$'\n'/'%0A'}"
+        CONTENT="${CONTENT//$'\r'/'%0D'}"
+        echo "content=$CONTENT" >> $GITHUB_OUTPUT
+    
+    - name: نشر على Facebook
+      env:
+        FB_PAGE_TOKEN: ${{ secrets.FB_PAGE_TOKEN }}
+        FB_PAGE_ID: ${{ secrets.FB_PAGE_ID }}
+      run: |
+        MESSAGE="${{ steps.read_content.outputs.content }}"
+        
+        curl -X POST "https://graph.facebook.com/v18.0/$FB_PAGE_ID/feed" \
+          -d "message=$MESSAGE" \
+          -d "access_token=$FB_PAGE_TOKEN"
+        
+        echo "✅ تم النشر بنجاح!"
