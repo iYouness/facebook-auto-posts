@@ -20,11 +20,11 @@ on:
   schedule:
     # يمكنك تعديل هذه الأوقات حسب رغبتك
     # الصباح: 8 صباحاً UTC
-    - cron: '53 17 * * *'
-    # الظهر: 1 ظهراً UTC
-    - cron: '55 17 * * *'
-    # المساء: 6 مساءً UTC
     - cron: '00 18 * * *'
+    # الظهر: 1 ظهراً UTC
+    - cron: '03 18 * * *'
+    # المساء: 6 مساءً UTC
+    - cron: '07 18 * * *'
 permissions:
   contents: write  # صلاحية الكتابة على الملفات
 
@@ -219,11 +219,55 @@ jobs:
         if [ "$ACTION" == "update" ] && [ -z "$EXISTING_POST_ID" ]; then
           echo "⚠️ لا يوجد منشور للتعديل - سيتم إنشاء منشور جديد بدلاً من ذلك"
           ACTION="publish"
-          echo "final_action=publish" >> $GITHUB_OUTPUT
-        else
-          echo "final_action=$ACTION" >> $GITHUB_OUTPUT
         fi
         
+        # محاولة التعديل أولاً إذا كان مطلوباً
+        if [ "$ACTION" == "update" ] && [ -n "$EXISTING_POST_ID" ]; then
+          echo "🔄 محاولة تعديل المنشور: $EXISTING_POST_ID"
+          
+          UPDATE_RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+            "https://graph.facebook.com/v21.0/$EXISTING_POST_ID" \
+            -d "message=$MESSAGE" \
+            -d "access_token=$FB_PAGE_TOKEN")
+          
+          UPDATE_HTTP_CODE=$(echo "$UPDATE_RESPONSE" | tail -n1)
+          UPDATE_BODY=$(echo "$UPDATE_RESPONSE" | head -n-1)
+          
+          echo "HTTP Status: $UPDATE_HTTP_CODE"
+          
+          # التحقق من نجاح التعديل
+          if echo "$UPDATE_BODY" | jq -e '.success == true' > /dev/null 2>&1; then
+            echo "post_id=$EXISTING_POST_ID" >> $GITHUB_OUTPUT
+            echo "final_action=update" >> $GITHUB_OUTPUT
+            
+            UPDATE_COUNT=$(jq --arg today "${{ steps.determine_action.outputs.today }}" \
+              '.posts[] | select(.date == $today) | .updates | length' \
+              data/posts_log.json)
+            
+            echo "✅ تم التعديل بنجاح!"
+            echo "🔢 التعديل رقم: $((UPDATE_COUNT + 1))"
+            
+          else
+            # فشل التعديل - التحقق من نوع الخطأ
+            ERROR_CODE=$(echo "$UPDATE_BODY" | jq -r '.error.code // empty')
+            ERROR_MESSAGE=$(echo "$UPDATE_BODY" | jq -r '.error.message // empty')
+            
+            echo "⚠️ فشل التعديل - الكود: $ERROR_CODE"
+            echo "📝 الرسالة: $ERROR_MESSAGE"
+            
+            # إذا كان الخطأ متعلق بالصلاحيات أو المنشور غير موجود، قم بالنشر بدلاً من ذلك
+            if [ "$ERROR_CODE" == "100" ] || [ "$ERROR_CODE" == "803" ] || [ "$ERROR_CODE" == "10" ]; then
+              echo "🔄 سيتم حذف المنشور القديم وإنشاء منشور جديد..."
+              ACTION="publish"
+            else
+              echo "❌ خطأ غير متوقع في التعديل!"
+              echo "$UPDATE_BODY" | jq '.'
+              exit 1
+            fi
+          fi
+        fi
+        
+        # النشر (إذا كان مطلوباً أو فشل التعديل)
         if [ "$ACTION" == "publish" ]; then
           echo "📤 جاري النشر..."
           
@@ -279,39 +323,11 @@ jobs:
             fi
             
             echo "post_id=$POST_ID" >> $GITHUB_OUTPUT
+            echo "final_action=publish" >> $GITHUB_OUTPUT
             echo "✅ تم النشر بنجاح!"
             echo "🆔 Post ID: $POST_ID"
           else
             echo "❌ فشل النشر!"
-            echo "$BODY" | jq '.'
-            exit 1
-          fi
-          
-        else
-          # التعديل
-          echo "🔄 جاري تعديل المنشور: $EXISTING_POST_ID"
-          
-          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
-            "https://graph.facebook.com/v21.0/$EXISTING_POST_ID" \
-            -d "message=$MESSAGE" \
-            -d "access_token=$FB_PAGE_TOKEN")
-          
-          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
-          BODY=$(echo "$RESPONSE" | head -n-1)
-          
-          echo "HTTP Status: $HTTP_CODE"
-          
-          if echo "$BODY" | jq -e '.success == true' > /dev/null 2>&1; then
-            echo "post_id=$EXISTING_POST_ID" >> $GITHUB_OUTPUT
-            
-            UPDATE_COUNT=$(jq --arg today "${{ steps.determine_action.outputs.today }}" \
-              '.posts[] | select(.date == $today) | .updates | length' \
-              data/posts_log.json)
-            
-            echo "✅ تم التعديل بنجاح!"
-            echo "🔢 التعديل رقم: $((UPDATE_COUNT + 1))"
-          else
-            echo "❌ فشل التعديل!"
             echo "$BODY" | jq '.'
             exit 1
           fi
@@ -328,13 +344,14 @@ jobs:
         HAS_IMAGE="${{ steps.find_image.outputs.has_image }}"
         
         if [ "$FINAL_ACTION" == "publish" ]; then
-          # التحقق إذا كان هناك سجل موجود لليوم (في حالة التعديل الفاشل)
+          # التحقق إذا كان هناك سجل موجود لليوم
           EXISTING_RECORD=$(jq -r --arg today "$TODAY" \
             '.posts[] | select(.date == $today) | .post_id' \
             data/posts_log.json)
           
           if [ -n "$EXISTING_RECORD" ] && [ "$EXISTING_RECORD" != "null" ]; then
             # حذف السجل القديم وإنشاء سجل جديد
+            echo "🗑️ حذف السجل القديم للمنشور: $EXISTING_RECORD"
             jq --arg date "$TODAY" \
               'del(.posts[] | select(.date == $date))' \
               data/posts_log.json > data/posts_log.tmp
@@ -394,7 +411,7 @@ jobs:
           TIME="${{ steps.determine_action.outputs.current_time }}"
           
           if [ "$FINAL_ACTION" == "publish" ]; then
-            MSG="✨ نشر منشور - $TIME UTC"
+            MSG="✨ نشر منشور جديد - $TIME UTC"
           else
             MSG="🔄 تعديل منشور - $TIME UTC"
           fi
