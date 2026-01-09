@@ -2,24 +2,17 @@
   "posts": [
     {
       "date": "2026-01-09",
-      "post_id": "952752851251999_122098661799205878",
+      "post_id": "952752851251999_122098673385205878",
       "initial_file": "post2.txt",
-      "published_at": "2026-01-09T17:37:14Z",
-      "published_time": "17:37",
+      "published_at": "2026-01-09T17:57:17Z",
+      "published_time": "17:57",
       "has_image": true,
       "updates": [
         {
           "file": "post2.txt",
-          "timestamp": "2026-01-09T17:37:14Z",
-          "time": "17:37",
+          "timestamp": "2026-01-09T17:57:17Z",
+          "time": "17:57",
           "action": "published",
-          "has_image": true
-        },
-        {
-          "file": "post1.txt",
-          "timestamp": "2026-01-09T17:37:30Z",
-          "time": "17:37",
-          "action": "updated",
           "has_image": true
         }
       ]
