@@ -68,6 +68,23 @@
           "has_image": true
         }
       ]
+    },
+    {
+      "date": "2026-01-11",
+      "post_id": "952752851251999_122100744333205878",
+      "initial_file": "post3.txt",
+      "published_at": "2026-01-11T18:20:02Z",
+      "published_time": "18:19",
+      "has_image": true,
+      "updates": [
+        {
+          "file": "post3.txt",
+          "timestamp": "2026-01-11T18:20:02Z",
+          "time": "18:19",
+          "action": "published",
+          "has_image": true
+        }
+      ]
     }
   ],
   "schedule": {
