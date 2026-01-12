@@ -114,6 +114,13 @@
           "time": "18:22",
           "action": "published",
           "has_image": true
+        },
+        {
+          "file": "post1.txt",
+          "timestamp": "2026-01-12T18:36:55Z",
+          "time": "18:36",
+          "action": "updated",
+          "has_image": true
         }
       ]
     }
