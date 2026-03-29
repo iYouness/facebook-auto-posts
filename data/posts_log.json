@@ -2456,6 +2456,13 @@
           "time": "18:30",
           "action": "published",
           "has_image": true
+        },
+        {
+          "file": "post1.txt",
+          "timestamp": "2026-03-29T18:48:22Z",
+          "time": "18:48",
+          "action": "updated",
+          "has_image": true
         }
       ]
     }
